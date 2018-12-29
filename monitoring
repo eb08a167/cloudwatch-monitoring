@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+
+import signal
+import sys
+import time
+from argparse import ArgumentParser
+from collections import namedtuple
+from itertools import product
+from pathlib import Path
+from subprocess import check_call
+
+from psutil import disk_partitions
+
+Metric = namedtuple('Metric', ['args'])
+
+
+def sigterm_handler(signal, frame):
+    sys.exit()
+
+
+def get_disk_paths(pattern):
+    for disk_partition in disk_partitions():
+        mountpoint = Path(disk_partition.mountpoint)
+        if mountpoint.match(pattern):
+            yield mountpoint
+
+
+def get_metrics(args):
+    metrics = []
+    if args.memory:
+        metrics.extend([
+            Metric(['--mem-util']),
+            Metric(['--mem-used']),
+            Metric(['--mem-avail']),
+        ])
+    if args.swap:
+        metrics.extend([
+            Metric(['--swap-util']),
+            Metric(['--swap-used']),
+        ])
+    disk_metrics = ['--disk-space-util', '--disk-space-used', '--disk-space-avail']
+    disk_paths = []
+    if args.disk_path_patterns:
+        for disk_path_pattern in args.disk_path_patterns:
+            relative_disk_path_pattern = disk_path_pattern.relative_to(disk_path_pattern.anchor)
+            full_disk_path_pattern = str(args.root_path / relative_disk_path_pattern)
+            pattern_disk_paths = get_disk_paths(full_disk_path_pattern)
+            disk_paths.extend(pattern_disk_paths)
+    for disk_metric, disk_path in product(disk_metrics, disk_paths):
+        metrics.append(Metric([disk_metric, f'--disk-path={disk_path}']))
+    return metrics
+
+
+def main():
+    parser = ArgumentParser()
+    parser.add_argument('--memory', action='store_true')
+    parser.add_argument('--swap', action='store_true')
+    parser.add_argument('--root-path', type=Path)
+    parser.add_argument('--disk-path-patterns', nargs='*', type=Path)
+    parser.add_argument('--interval', type=int, default=60)
+    args = parser.parse_args()
+    while True:
+        metrics = get_metrics(args)
+        for metric in metrics:
+            check_call(['perl', 'aws-scripts-mon/mon-put-instance-data.pl', '--verbose', *metric.args])
+        time.sleep(args.interval)
+
+
+if __name__ == '__main__':
+    signal.signal(signal.SIGTERM, sigterm_handler)
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
